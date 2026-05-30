@@ -1,236 +1,156 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <!-- 手机适配核心 -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>视觉小车 - 手机/电脑通用</title>
-    <style>
-        * {
-            margin: 0; padding: 0; box-sizing: border-box;
-            -webkit-user-select: none; user-select: none;
-            -webkit-touch-callout: none;
-        }
-        body { 
-            background: #111; color: white; 
-            text-align: center; font-family: Arial;
-            width: 100vw; height: 100vh;
-            overflow: hidden;
-        }
-        #canvas {
-            border: 2px solid #fff;
-            display: block;
-            margin: 10px auto;
-            /* 手机自适应 */
-            max-width: 100%;
-            height: auto;
-        }
-        .btn {
-            padding: 14px 24px; margin: 6px;
-            font-size: 16px; font-weight: bold;
-            background: #007bff; color: white;
-            border: none; border-radius: 8px;
-            touch-action: manipulation;
-        }
-        .btn-red { background: #dc3545; }
-        .title { margin: 10px 0; font-size: 18px; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 蓝牙小车</title>
+<style>
+* {
+margin: 0;
+padding: 0;
+box-sizing: border-box;
+}
+body {
+font-family: Arial, sans-serif;
+background: #000;
+color: #fff;
+text-align: center;
+padding: 10px;
+}
+.container {
+max-width: 600px;
+margin: 0 auto;
+}
+h1 {
+font-size: 22px;
+margin: 10px 0;
+}
+.video-box {
+width: 100%;
+background: #222;
+border-radius: 8px;
+overflow: hidden;
+margin-bottom: 15px;
+}
+#video {
+width: 100%;
+display: block;
+}
+.controls {
+display: grid;
+grid-template-columns: repeat(3, 80px);
+grid-template-rows: repeat(3, 80px);
+gap: 8px;
+justify-content: center;
+margin: 15px 0;
+}
+.btn {
+width: 80px;
+height: 80px;
+font-size: 30px;
+border: none;
+border-radius: 8px;
+background: #333;
+color: #fff;
+touch-action: manipulation;
+}
+.btn:active {
+background: #666;
+}
+.btn-up { grid-column: 2; grid-row: 1; }
+.btn-left { grid-column: 1; grid-row: 2; }
+.btn-stop { grid-column: 2; grid-row: 2; }
+.btn-right { grid-column: 3; grid-row: 2; }
+.btn-down { grid-column: 2; grid-row: 3; }
+.status {
+margin: 10px 0;
+font-size: 16px;
+color: #bbb;
+}
+</style>
 </head>
 <body>
-    <div class="title">✅ 手机/电脑通用 | 精准颜色识别</div>
-    <button class="btn" onclick="connectBLE()">连接蓝牙小车</button>
-    <button class="btn" onclick="startCamera()">启动摄像头</button>
-    <button class="btn btn-red" onclick="reset()">停止并重置</button>
-    <div style="margin:4px; font-size:14px;">👉 点击画面选目标点</div>
-    <canvas id="canvas" width="640" height="480"></canvas>
+<div class="container">
+<h1>ESP32 蓝牙小车</h1>
+
+<div class="video-box">
+<video id="video" autoplay muted playsinline></video>
+</div>
+
+<div class="controls">
+<button class="btn btn-up" id="btnUp">↑</button>
+<button class="btn btn-left" id="btnLeft">←</button>
+<button class="btn btn-stop" id="btnStop">■</button>
+<button class="btn btn-right" id="btnRight">→</button>
+<button class="btn btn-down" id="btnDown">↓</button>
+</div>
+
+<p class="status" id="status">未连接</p>
+</div>
 
 <script>
-// ================== 蓝牙UUID（不变） ==================
+let bleServer, service, characteristic;
 const SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb";
-const CHAR_UUID    = "0000ffe1-0000-1000-8000-00805f9b34fb";
+const CHAR_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb";
 
-let characteristic = null;
-let canvas = document.getElementById("canvas");
-let ctx = canvas.getContext("2d");
-let video = document.createElement("video");
-video.setAttribute('playsinline', ''); // 手机必须加！
-video.setAttribute('webkit-playsinline', '');
-video.width = 640;
-video.height = 480;
+const statusEl = document.getElementById("status");
+const videoEl = document.getElementById("video");
 
-let target_blue = null;
-let lastCmd = "";
-
-// ================== 手机/电脑 通用点击/触控 ==================
-function setTarget(e) {
-    let rect = canvas.getBoundingClientRect();
-    let x, y;
-    if (e.type.includes("touch")) {
-        x = e.touches[0].clientX - rect.left;
-        y = e.touches[0].clientY - rect.top;
-    } else {
-        x = e.clientX - rect.left;
-        y = e.clientY - rect.top;
-    }
-    // 坐标缩放适配
-    let scaleX = canvas.width / rect.width;
-    let scaleY = canvas.height / rect.height;
-    target_blue = {
-        x: x * scaleX,
-        y: y * scaleY
-    };
-}
-canvas.addEventListener("click", setTarget);
-canvas.addEventListener("touchstart", (e) => {
-    e.preventDefault();
-    setTarget(e);
-});
-
-// ================== 蓝牙连接 ==================
+// 蓝牙连接
 async function connectBLE() {
-    try {
-        let device = await navigator.bluetooth.requestDevice({
-            acceptAllDevices: true,
-            optionalServices: [SERVICE_UUID]
-        });
-        let server = await device.gatt.connect();
-        let service = await server.getPrimaryService(SERVICE_UUID);
-        characteristic = await service.getCharacteristic(CHAR_UUID);
-        alert("✅ 蓝牙连接成功！");
-    } catch (err) {
-        alert("❌ 连接失败：" + err.message);
-    }
+try {
+statusEl.textContent = "连接中...";
+const device = await navigator.bluetooth.requestDevice({
+filters: [{ name: "ESP32_CAR" }],
+optionalServices: [SERVICE_UUID]
+});
+bleServer = await device.gatt.connect();
+service = await bleServer.getPrimaryService(SERVICE_UUID);
+characteristic = await service.getCharacteristic(CHAR_UUID);
+statusEl.textContent = "已连接";
+} catch (e) {
+statusEl.textContent = "连接失败";
+console.error(e);
+}
 }
 
-// ================== 发送指令 ==================
-async function send(cmd) {
-    if (!characteristic || cmd === lastCmd) return;
-    try {
-        await characteristic.writeValue(new TextEncoder().encode(cmd));
-        lastCmd = cmd;
-    } catch (e) {}
+// 发送指令
+function sendCmd(cmd) {
+if (!characteristic) return;
+let data = new TextEncoder().encode(cmd);
+characteristic.writeValue(data);
 }
 
-function reset() {
-    send("S");
-    lastCmd = "";
-    target_blue = null;
-    alert("🛑 已停止");
-}
+// 按键事件
+document.getElementById("btnUp").addEventListener("mousedown", ()=>sendCmd("f"));
+document.getElementById("btnUp").addEventListener("touchstart", ()=>sendCmd("f"));
+document.getElementById("btnUp").addEventListener("mouseup", ()=>sendCmd("s"));
+document.getElementById("btnUp").addEventListener("touchend", ()=>sendCmd("s"));
 
-// ================== 摄像头（手机完美兼容） ==================
-async function startCamera() {
-    try {
-        let stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-                facingMode: "environment", // 手机后置摄像头
-                width: { ideal: 640 },
-                height: { ideal: 480 }
-            }
-        });
-        video.srcObject = stream;
-        video.play();
-        requestAnimationFrame(loop);
-    } catch (e) {
-        alert("⚠️ 请允许摄像头权限");
-    }
-}
+document.getElementById("btnDown").addEventListener("mousedown", ()=>sendCmd("b"));
+document.getElementById("btnDown").addEventListener("touchstart", ()=>sendCmd("b"));
+document.getElementById("btnDown").addEventListener("mouseup", ()=>sendCmd("s"));
+document.getElementById("btnDown").addEventListener("touchend", ()=>sendCmd("s"));
 
-// ================== RGB转HSV ==================
-function rgb2hsv(r,g,b){
-    let ra=r/255,ga=g/255,ba=b/255;
-    let max=Math.max(ra,ga,ba),min=Math.min(ra,ga,ba);
-    let h=0,s=0,v=max,d=max-min;
-    s=max===0?0:d/max;
-    if(max!==min){
-        switch(max){
-            case ra:h=(ga-ba)/d+(ga<ba?6:0);break;
-            case ga:h=(ba-ra)/d+2;break;
-            case ba:h=(ra-ga)/d+4;break;
-        }
-        h /= 6;
-    }
-    return [h*180,s,v];
-}
+document.getElementById("btnLeft").addEventListener("mousedown", ()=>sendCmd("l"));
+document.getElementById("btnLeft").addEventListener("touchstart", ()=>sendCmd("l"));
+document.getElementById("btnLeft").addEventListener("mouseup", ()=>sendCmd("s"));
+document.getElementById("btnLeft").addEventListener("touchend", ()=>sendCmd("s"));
 
-// ================== 精准识别（最大轮廓+降噪，你满意的版本） ==================
-function findBiggestCenter(hMin,hMax,sMin,vMin){
-    let w=640,h=480;
-    let data=ctx.getImageData(0,0,w,h).data;
-    let grid=new Array(w*h).fill(0);
-    let total=0;
+document.getElementById("btnRight").addEventListener("mousedown", ()=>sendCmd("r"));
+document.getElementById("btnRight").addEventListener("touchstart", ()=>sendCmd("r"));
+document.getElementById("btnRight").addEventListener("mouseup", ()=>sendCmd("s"));
+document.getElementById("btnRight").addEventListener("touchend", ()=>sendCmd("s"));
 
-    for(let y=0;y<h;y++){
-        for(let x=0;x<w;x++){
-            let i=(y*w+x)*4;
-            let hsv=rgb2hsv(data[i],data[i+1],data[i+2]);
-            let hue=hsv[0],sat=hsv[1],val=hsv[2];
-            if(hue>=hMin && hue<=hMax && sat>=sMin && val>=vMin){
-                grid[y*w+x]=1; total++;
-            }
-        }
-    }
+document.getElementById("btnStop").addEventListener("click", ()=>sendCmd("s"));
 
-    if(total<150) return null;
+// 摄像头（请求权限）
+navigator.mediaDevices.getUserMedia({ video: true })
+.then(stream => { videoEl.srcObject = stream; })
+.catch(e => console.error("摄像头权限失败", e));
 
-    let visited=new Array(w*h).fill(false);
-    let best={count:0,x:0,y:0};
-    const dirs=[[-1,0],[1,0],[0,-1],[0,1]];
-    
-    for(let y=0;y<h;y++){
-        for(let x=0;x<w;x++){
-            let idx=y*w+x;
-            if(grid[idx]===1 && !visited[idx]){
-                let q=[{x,y}],sumX=0,sumY=0,c=0;
-                visited[idx]=true;
-                while(q.length){
-                    let p=q.shift(); sumX+=p.x; sumY+=p.y; c++;
-                    for(let d of dirs){
-                        let nx=p.x+d[0],ny=p.y+d[1];
-                        let nid=ny*w+nx;
-                        if(nx>=0&&nx<w&&ny>=0&&ny<h&&grid[nid]&&!visited[nid]){
-                            visited[nid]=true; q.push({x:nx,y:ny});
-                        }
-                    }
-                }
-                if(c>best.count) best={count:c,x:sumX/c,y:sumY/c};
-            }
-        }
-    }
-
-    return best.count>80 ? {x:best.x,y:best.y} : null;
-}
-
-function red(){ return findBiggestCenter(0,15,0.47,0.39); }
-function green(){ return findBiggestCenter(40,70,0.2,0.2); }
-
-// ================== 主循环 ==================
-function loop(){
-    ctx.drawImage(video,0,0,640,480);
-    let R=red(), G=green();
-
-    if(R){ctx.beginPath();ctx.arc(R.x,R.y,6,0,Math.PI*2);ctx.fillStyle="red";ctx.fill();}
-    if(G){ctx.beginPath();ctx.arc(G.x,G.y,6,0,Math.PI*2);ctx.fillStyle="lime";ctx.fill();}
-    if(target_blue){ctx.beginPath();ctx.arc(target_blue.x,target_blue.y,45,0,Math.PI*2);ctx.strokeStyle="blue";ctx.lineWidth=2;ctx.stroke();}
-
-    if(R&&G&&target_blue){
-        let rx=R.x,ry=R.y,gx=G.x,gy=G.y,bx=target_blue.x,by=target_blue.y;
-        if(Math.hypot(gx-bx,gy-by)<90){send("S");target_blue=null;requestAnimationFrame(loop);return;}
-
-        let cross=(gx-rx)*(by-ry)-(gy-ry)*(bx-rx);
-        let straight=Math.abs(cross)<30000;
-        let d1=Math.hypot(gx-rx,gy-ry);
-        let d2=Math.hypot(bx-gx,by-gy);
-        let dt=Math.hypot(bx-rx,by-ry);
-        let order=(d1+d2)<dt*1.3;
-
-        if(straight&&order)send("F");
-        else send(cross>0?"L":"R");
-    }else{
-        send("S");
-    }
-    requestAnimationFrame(loop);
-}
+// 页面加载自动连接
+window.addEventListener("load", connectBLE);
 </script>
 </body>
 </html>
