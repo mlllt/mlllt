@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+    <title></title>
+    <style>
+        body { background: #111; color: white; text-align: center; margin:0; padding:10px; }
+        #canvas { 
+            border: 3px solid #fff; 
+            margin: 10px auto; 
+            max-width: 100%; 
+            height: auto; 
+            display:block;
+        }
+        button { padding: 12px 24px; font-size: 16px; margin: 8px; touch-action: manipulation; }
+    </style>
+</head>
+<body>
+
+    <button onclick="connectBLE()">连接蓝牙小车</button>
+    <button onclick="startCamera()">启动摄像头</button>
+    <button onclick="reset()">停止</button><br>
+    
+    <canvas id="canvas" width="640" height="480"></canvas>
+
+<script>
+const SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb";
+const CHAR_UUID    = "0000ffe1-0000-1000-8000-00805f9b34fb";
+
+let device = null;
+let gatt = null;
+let service = null;
+let characteristic = null;
+
+let canvas = document.getElementById("canvas");
+let ctx = canvas.getContext("2d");
+let video = document.createElement("video");
+video.width = 640;
+video.height = 480;
+video.autoplay = true;
+video.muted = true;
+video.playsInline = true;
+
+let target_blue = null;
+let lastCmd = "";
+
+// ========== 统一手指/鼠标坐标 ==========
+function getCanvasPos(e){
+    let rect = canvas.getBoundingClientRect();
+    let sx = canvas.width / rect.width;
+    let sy = canvas.height / rect.height;
+    return {
+        x: (e.clientX - rect.left) * sx,
+        y: (e.clientY - rect.top) * sy
+    };
+}
+
+canvas.addEventListener("pointerdown",function(e){
+    e.preventDefault();
+    target_blue = getCanvasPos(e);
+});
+
+// ========== 蓝牙 ==========
+async function connectBLE() {
+    try {
+        device = await navigator.bluetooth.requestDevice({
+            acceptAllDevices: true,
+            optionalServices: [SERVICE_UUID]
+        });
+        gatt = await device.gatt.connect();
+        service = await gatt.getPrimaryService(SERVICE_UUID);
+        characteristic = await service.getCharacteristic(CHAR_UUID);
+        alert("✅ 蓝牙连接成功！");
+    } catch (err) {
+        alert("❌ 连接失败：" + err.message);
+    }
+}
+
+async function send(cmd) {
+    if (!characteristic) return;
+    try {
+        await characteristic.writeValue(new TextEncoder().encode(cmd));
+        lastCmd = cmd;
+    } catch (e) {}
+}
+
+function reset() { send("S"); lastCmd = ""; target_blue = null; }
+
+// ========== 摄像头 ==========
+async function startCamera() {
+    try {
+        let stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "environment" }
+        });
+        video.srcObject = stream;
+        await video.play();
+        requestAnimationFrame(loop);
+    } catch (e) {
+        alert("摄像头失败：" + e.message);
+    }
+}
+
+// ========== 颜色识别算法 ==========
+function rgb2hsv(r,g,b){
+    let ra=r/255,ga=g/255,ba=b/255;
+    let max=Math.max(ra,ga,ba),min=Math.min(ra,ga,ba);
+    let h=0,s=0,v=max,d=max-min;
+    s=max===0?0:d/max;
+    if(max!==min){
+        switch(max){
+            case ra:h=(ga-ba)/d+(ga<ba?6:0);break;
+            case ga:h=(ba-ra)/d+2;break;
+            case ba:h=(ra-ga)/d+4;break;
+        }
+        h/=6;
+    }
+    return [h*180,s,v];
+}
+
+// 以红色按钮真实HSV为中心划定阈值
+function findBiggestCenter(sMin,vMin,vMax){
+    let w=640,h=480;
+    let data=ctx.getImageData(0,0,w,h).data;
+    let grid=new Array(w*h).fill(0);
+    let total=0;
+
+    for(let y=0;y<h;y++){
+        for(let x=0;x<w;x++){
+            let i=(y*w+x)*4;
+            let hsv=rgb2hsv(data[i],data[i+1],data[i+2]);
+            let hue=hsv[0],sat=hsv[1],val=hsv[2];
+            // 匹配按钮真实色相：0~22，包含纯红+高光轻微橙红
+            let isRedHue = (hue >= 0 && hue <= 22);
+            // sMin=0.08 过滤影子，v匹配按钮明暗区间
+            if(isRedHue && sat>=sMin && val>=vMin && val<=vMax){
+                grid[y*w+x]=1; total++;
+            }
+        }
+    }
+
+    // 全局总像素门槛，过滤地面零星杂色
+    if(total<45) return null;
+    let visited=new Array(w*h).fill(false);
+    let best={count:0,x:0,y:0};
+    const dirs=[[-1,0],[1,0],[0,-1],[0,1]];
+    
+    for(let y=0;y<h;y++){
+        for(let x=0;x<w;x++){
+            let idx=y*w+x;
+            if(grid[idx]===1 && !visited[idx]){
+                let q=[{x,y}],sumX=0,sumY=0,c=0;
+                visited[idx]=true;
+                while(q.length){
+                    let p=q.shift(); sumX+=p.x; sumY+=p.y; c++;
+                    for(let d of dirs){
+                        let nx=p.x+d[0],ny=p.y+d[1];
+                        let nid=ny*w+nx;
+                        if(nx>=0&&nx<w&&ny>=0&&ny<h&&grid[nid]&&!visited[nid]){
+                            visited[nid]=true; q.push({x:nx,y:ny});
+                        }
+                    }
+                }
+                // 适配按钮高光碎裂小块
+                if(c>22 && c>best.count) best={count:c,x:sumX/c,y:sumY/c};
+            }
+        }
+    }
+    return best.count>22 ? {x:best.x,y:best.y} : null;
+}
+
+// 精准匹配按钮色彩的核心参数
+// sMin=0.08  vMin=0.20  vMax=0.97
+function red(){ return findBiggestCenter(0.08,0.20,0.97); }
+
+// 绿色识别独立函数
+function green(){ 
+    function findGreen(hMin,hMax,sMin,vMin,vMax){
+        let w=640,h=480;
+        let data=ctx.getImageData(0,0,w,h).data;
+        let grid=new Array(w*h).fill(0);
+        let total=0;
+        for(let y=0;y<h;y++){
+            for(let x=0;x<w;x++){
+                let hsv=rgb2hsv(data[(y*w+x)*4],data[(y*w+x)*4+1],data[(y*w+x)*4+2]);
+                let hue=hsv[0],sat=hsv[1],val=hsv[2];
+                if(hue>=hMin && hue<=hMax && sat>=sMin && val>=vMin && val<=vMax){
+                    grid[y*w+x]=1; total++;
+                }
+            }
+        }
+        if(total<30) return null;
+        let visited=new Array(w*h).fill(false);
+        let best={count:0,x:0,y:0};
+        const dirs=[[-1,0],[1,0],[0,-1],[0,1]];
+        for(let y=0;y<h;y++){
+            for(let x=0;x<w;x++){
+                let idx=y*w+x;
+                if(grid[idx]===1 && !visited[idx]){
+                    let q=[{x,y}],sumX=0,sumY=0,c=0;
+                    visited[idx]=true;
+                    while(q.length){
+                        let p=q.shift(); sumX+=p.x; sumY+=p.y; c++;
+                        for(let d of dirs){
+                            let nx=p.x+d[0],ny=p.y+d[1];
+                            let nid=ny*w+nx;
+                            if(nx>=0&&nx<w&&ny>=0&&ny<h&&grid[nid]&&!visited[nid]){
+                                visited[nid]=true; q.push({x:nx,y:ny});
+                            }
+                        }
+                    }
+                    if(c>20 && c>best.count) best={count:c,x:sumX/c,y:sumY/c};
+                }
+            }
+        }
+        return best.count>20 ? {x:best.x,y:best.y} : null;
+    }
+    return findGreen(40,70,0.2,0.2,0.96);
+}
+
+// ========== 主循环 ==========
+function loop(){
+    ctx.drawImage(video,0,0,640,480);
+    let R=red(), G=green();
+
+    if(R){ctx.beginPath();ctx.arc(R.x,R.y,6,0,Math.PI*2);ctx.fillStyle="red";ctx.fill();}
+    if(G){ctx.beginPath();ctx.arc(G.x,G.y,6,0,Math.PI*2);ctx.fillStyle="lime";ctx.fill();}
+    if(target_blue){ctx.beginPath();ctx.arc(target_blue.x,target_blue.y,45,0,Math.PI*2);ctx.strokeStyle="blue";ctx.lineWidth=2;ctx.stroke();}
+
+    if(R&&G&&target_blue){
+        let rx=R.x,ry=R.y; // 红点
+        let gx=G.x,gy=G.y; // 绿点
+        let bx=target_blue.x,by=target_blue.y; // 蓝点目标
+
+        // 红点靠近蓝目标就停止
+        if(Math.hypot(rx-bx,ry-by)<90){
+            send("S");
+            target_blue=null;
+            requestAnimationFrame(loop);
+            return;
+        }
+
+        // 向量：G->R 与 G->B
+        let cross = (rx - gx) * (by - gy) - (ry - gy) * (bx - gx);
+        let straight = Math.abs(cross) < 30000;
+
+        // 距离：绿-红，红-蓝，绿-蓝
+        let dGR = Math.hypot(rx - gx, ry - gy);
+        let dRB = Math.hypot(bx - rx, by - ry);
+        let dGB = Math.hypot(bx - gx, by - gy);
+
+        // 判定：红点在绿点、蓝点中间
+        let redBetweenGreenBlue = (dGR + dRB) < dGB * 1.3;
+
+        // 红点在中间且三点接近直线 → 直行F；否则根据叉积左右转
+        if(straight && redBetweenGreenBlue){
+            send("F");
+        }else{
+            send(cross > 0 ? "L" : "R");
+        }
+    }else{
+        send("S");
+    }
+    requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
